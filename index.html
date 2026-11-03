@@ -104,7 +104,7 @@ main { display: flex; flex-direction: column; gap: 24px; padding-top: 20px; }
 .monthnav button { width: 36px; height: 36px; border: 1px solid var(--line-strong); background: none; border-radius: 6px; font-size: 18px; line-height: 1; }
 .monthnav button:hover:not(:disabled) { background: var(--accent-soft); }
 .monthnav button:disabled { opacity: .35; cursor: default; }
-.monthnav strong { min-width: 138px; text-align: center; font: 600 17px/1 var(--display); }
+.monthnav select { width: auto; min-height: 36px; padding: 4px 6px; border: 0; background: transparent; text-align: center; font: 600 17px/1.2 var(--display); cursor: pointer; }
 
 .hero { position: relative; overflow: hidden; background: var(--hero); border-radius: 10px; padding: 24px; display: flex; flex-direction: column; gap: 6px; }
 .hero > * { position: relative; }
@@ -288,7 +288,6 @@ dialog#sheet::backdrop { background: rgba(8, 20, 24, .5); }
   .hero svg.rosette { right: -130px; top: -110px; }
   .plan-row { grid-template-columns: minmax(0, 1fr) 104px 36px; }
   .plan-row .avg { grid-column: 1; grid-row: 2; }
-  .monthnav strong { min-width: 124px; }
   dialog#sheet { width: 100vw; max-width: 100vw; margin: auto 0 0; border-radius: 14px 14px 0 0; }
 }
 @media (prefers-reduced-motion: no-preference) {
@@ -457,8 +456,9 @@ const catName = id => (allCats().find(c => c.id === id) || {}).name || 'Other';
 const debtById = id => S.debts.find(d => d.id === id);
 const activeDebts = () => S.debts.filter(d => d.balance > 0);
 const minsTotal = () => sum(activeDebts(), d => Math.min(d.min, d.balance));
+const signed = t => (t.refund ? -t.amount : t.amount);
 const inMonth = m => S.tx.filter(t => t.date && t.date.startsWith(m));
-const describe = t => t.note || (t.kind === 'income' ? 'Income' : t.kind === 'debt' ? ((debtById(t.debtId) || {}).name || 'Debt payment') : catName(t.cat));
+const describe = t => t.note || (t.kind === 'income' ? 'Income' : t.kind === 'debt' ? ((debtById(t.debtId) || {}).name || 'Debt payment') : t.kind === 'transfer' ? 'Transfer' : catName(t.cat));
 
 function dueItems(m) {
   const txs = inMonth(m), out = [];
@@ -477,11 +477,13 @@ function monthStats(m) {
   const byCat = {};
   let income = 0, spent = 0, saved = 0, debt = 0;
   for (const t of txs) {
+    if (t.kind === 'transfer') continue;
     if (t.kind === 'income') income += t.amount;
     else if (t.kind === 'debt') debt += t.amount;
     else {
-      byCat[t.cat] = (byCat[t.cat] || 0) + t.amount;
-      if (saveIds.has(t.cat)) saved += t.amount; else spent += t.amount;
+      const a = signed(t);
+      byCat[t.cat] = (byCat[t.cat] || 0) + a;
+      if (saveIds.has(t.cat)) saved += a; else spent += a;
     }
   }
   const cats = liveCats();
@@ -495,7 +497,7 @@ function catAverage(id) {
   let total = 0, n = 0;
   for (let i = 1; i <= 3; i++) {
     const m = shiftMonth(curMonth(), -i), txs = inMonth(m);
-    if (txs.length) { n++; total += sum(txs.filter(t => t.kind === 'expense' && t.cat === id), t => t.amount); }
+    if (txs.length) { n++; total += sum(txs.filter(t => t.kind === 'expense' && t.cat === id), signed); }
   }
   return n ? Math.round(total / n) : null;
 }
@@ -555,9 +557,17 @@ function rosette() {
 const ROSETTE = rosette();
 
 /* ---------- views ---------- */
+function monthOptions() {
+  const first = S.tx.reduce((a, t) => (t.date && t.date < a ? t.date : a), curMonth() + '-01').slice(0, 7);
+  const start = UI.month < first ? UI.month : first;
+  let end = shiftMonth(curMonth(), 12); if (UI.month > end) end = UI.month;
+  const out = [];
+  for (let m = end; m >= start; m = shiftMonth(m, -1)) out.push(`<option value="${m}" ${m === UI.month ? 'selected' : ''}>${esc(monthName(m))}</option>`);
+  return out.join('');
+}
 const monthNav = () => `<div class="monthnav">
   <button type="button" data-act="month" data-n="-1" aria-label="Previous month">&#8249;</button>
-  <strong aria-live="polite">${esc(monthName(UI.month))}</strong>
+  <select id="month-pick" aria-label="Choose a month">${monthOptions()}</select>
   <button type="button" data-act="month" data-n="1" aria-label="Next month" ${UI.month >= shiftMonth(curMonth(), 12) ? 'disabled' : ''}>&#8250;</button>
 </div>`;
 
@@ -583,9 +593,9 @@ function setupSteps() {
 function heroBlock(m, st) {
   const label = monthName(m, { month: 'long' });
   let eyebrow, big, sub, over = st.left < 0;
-  if (st.budget === 0 && st.spent === 0) {
-    eyebrow = `Left to spend in ${label}`; big = money(0);
-    sub = 'Set a budget on the Plan tab and this will show what you can still spend.';
+  if (st.budget === 0) {
+    eyebrow = `Spent in ${label}`; big = money(st.spent); over = false;
+    sub = 'Set a budget on the Plan tab to see what you have left to spend.';
   } else if (st.isCur) {
     const days = dim(m) - now().getDate() + 1;
     eyebrow = over ? `Over budget in ${label}` : `Left to spend in ${label}, after bills`;
@@ -613,18 +623,18 @@ function envelopes(m, st) {
     return `<div class="empty"><b>No budgets yet</b>Give each category a monthly limit on the Plan tab, and each one gets a running balance here.</div>`;
   }
   const row = (id, name, budget, isSave) => {
-    const spent = st.byCat[id] || 0, pct = budget ? spent / budget * 100 : (spent ? 100 : 0);
+    const spent = st.byCat[id] || 0, pct = budget ? spent / budget * 100 : 0;
     let cls = '', note;
-    if (isSave) { cls = 'good'; note = spent >= budget && budget ? `<span class="chip good">&#10003; Goal reached</span>` : `${money(budget - spent)} to reach your goal`; }
-    else if (!budget) { cls = 'near'; note = `<span class="chip warn">No budget set</span>`; }
+    if (isSave) { cls = 'good'; note = spent >= budget && budget ? `<span class="chip good">&#10003; Goal reached</span>` : budget ? `${money(budget - spent)} to reach your goal` : 'No goal set'; }
+    else if (!budget) { note = 'No budget set'; }
     else if (spent > budget) { cls = 'over'; note = `<span class="chip bad">&#9650; Over by ${money(spent - budget)}</span>`; }
     else if (spent === budget) { note = `<span class="chip info">Fully used</span>`; }
     else if (pct >= 90) { cls = 'near'; note = `<span class="chip warn">Almost gone: ${money(budget - spent)} left</span>`; }
     else note = `${money(budget - spent)} left`;
     return `<button type="button" class="env" data-act="drill" data-cat="${esc(id)}" aria-label="${esc(name)}, see entries">
       <span class="name">${esc(name)}</span>
-      <span class="amt"><b>${money(spent)}</b> of ${money(budget)}</span>
-      <span class="bar" aria-hidden="true"><i class="${cls}" style="width:${Math.min(100, pct).toFixed(1)}%"></i>${pace != null && !isSave && budget ? `<u style="left:${pace.toFixed(1)}%"></u>` : ''}</span>
+      <span class="amt"><b>${money(spent)}</b>${budget ? ' of ' + money(budget) : ' spent'}</span>
+      <span class="bar" aria-hidden="true"><i class="${cls}" style="width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%"></i>${pace != null && !isSave && budget ? `<u style="left:${pace.toFixed(1)}%"></u>` : ''}</span>
       <span class="note">${note}</span></button>`;
   };
   return `<div class="rows">${cats.map(c => row(c.id, c.name, c.budget, c.save)).join('')}${orphans.map(id => row(id, catName(id), 0, false)).join('')}</div>`;
@@ -656,6 +666,7 @@ function flowData(m) {
   return rows;
 }
 
+const ofPlan = (v, w) => (v ? `of ${money(v)} ${w}` : 'No plan set');
 function monthView() {
   const m = UI.month, st = monthStats(m);
   const planDebt = minsTotal() + (S.plan.extra || 0);
@@ -663,10 +674,10 @@ function monthView() {
   return `<div class="vhead"><h1>Your month</h1>${monthNav()}</div>
     ${heroBlock(m, st)}
     <section class="figs" aria-label="Month totals">
-      <div class="fig"><span class="eyebrow">Money in</span><b>${money(st.income)}</b><small>of ${money(S.plan.income)} expected</small></div>
-      <div class="fig"><span class="eyebrow">Spent</span><b>${money(st.spent)}</b><small>of ${money(st.budget)} budget</small></div>
-      <div class="fig"><span class="eyebrow">Saved</span><b>${money(st.saved)}</b><small>of ${money(st.saveGoal)} goal</small></div>
-      <div class="fig"><span class="eyebrow">Paid to debt</span><b>${money(st.debt)}</b><small>of ${money(planDebt)} planned</small></div>
+      <div class="fig"><span class="eyebrow">Money in</span><b>${money(st.income)}</b><small>${ofPlan(S.plan.income, 'expected')}</small></div>
+      <div class="fig"><span class="eyebrow">Spent</span><b>${money(st.spent)}</b><small>${ofPlan(st.budget, 'budget')}</small></div>
+      <div class="fig"><span class="eyebrow">Saved</span><b>${money(st.saved)}</b><small>${ofPlan(st.saveGoal, 'goal')}</small></div>
+      <div class="fig"><span class="eyebrow">Paid to debt</span><b>${money(st.debt)}</b><small>${ofPlan(planDebt, 'planned')}</small></div>
     </section>
     ${setupSteps()}
     <div class="cols">
@@ -686,12 +697,12 @@ function monthView() {
 function activityView() {
   const m = UI.month;
   let list = inMonth(m).slice().sort((a, b) => b.date.localeCompare(a.date));
-  const totals = { inn: sum(list.filter(t => t.kind === 'income'), t => t.amount), out: sum(list.filter(t => t.kind !== 'income'), t => t.amount) };
+  const totals = { inn: sum(list.filter(t => t.kind === 'income'), t => t.amount), out: sum(list.filter(t => t.kind === 'expense' || t.kind === 'debt'), signed) };
   if (UI.kind !== 'all') list = list.filter(t => t.kind === UI.kind);
   if (UI.cat) list = list.filter(t => t.kind === 'expense' && t.cat === UI.cat);
   const q = UI.q.trim().toLowerCase();
   if (q) list = list.filter(t => [t.note, t.kind === 'expense' ? catName(t.cat) : '', (debtById(t.debtId) || {}).name].join(' ').toLowerCase().includes(q));
-  const pills = [['all', 'All'], ['expense', 'Spending'], ['income', 'Money in'], ['debt', 'Debt payments']];
+  const pills = [['all', 'All'], ['expense', 'Spending'], ['income', 'Money in'], ['debt', 'Debt payments'], ['transfer', 'Transfers']];
   return `<div class="vhead"><h1>Entries</h1>${monthNav()}</div>
     <div class="sect-head"><small class="num">${money(totals.inn)} in &middot; ${money(totals.out)} out</small>
       ${downloads ? `<button type="button" class="btn small" data-act="csv">Export all as CSV</button>` : ''}</div>
@@ -701,11 +712,12 @@ function activityView() {
       <input id="f-q" type="search" placeholder="Search notes" aria-label="Search notes" value="${esc(UI.q)}">
     </div>
     ${list.length ? `<div class="reg">${list.map(t => {
-      const d = parseD(t.date), sub = t.kind === 'income' ? 'Money in' : t.kind === 'debt' ? `Debt payment${debtById(t.debtId) ? ' &middot; ' + esc(debtById(t.debtId).name) : ''}` : esc(catName(t.cat));
+      const d = parseD(t.date), sub = t.kind === 'income' ? 'Money in' : t.kind === 'transfer' ? 'Transfer, not counted as spending' : t.kind === 'debt' ? `Debt payment${debtById(t.debtId) ? ' &middot; ' + esc(debtById(t.debtId).name) : ''}` : (t.refund ? 'Refund &middot; ' : '') + esc(catName(t.cat));
+      const isIn = t.kind === 'income' || t.refund || (t.kind === 'transfer' && t.dir === 'in');
       return `<button type="button" class="reg-row" data-act="edit-tx" data-id="${esc(t.id)}">
         <span class="d"><b>${d.getDate()}</b>${d.toLocaleDateString('en-US', { weekday: 'short' })}</span>
         <span class="w"><b>${esc(describe(t))}</b><small>${sub}</small></span>
-        <span class="a ${t.kind === 'income' ? 'in' : ''}">${t.kind === 'income' ? '+' : '&minus;'}${money(t.amount)}</span></button>`;
+        <span class="a ${isIn ? 'in' : ''}">${isIn ? '+' : '&minus;'}${money(t.amount)}</span></button>`;
     }).join('')}</div>` : `<div class="empty"><b>${inMonth(m).length ? 'No entries match those filters' : `Nothing logged in ${esc(monthName(m, { month: 'long' }))}`}</b>${inMonth(m).length ? 'Clear the filters to see everything for this month.' : 'Add an expense, paycheck or debt payment and it will appear here.'}</div>`}`;
 }
 
@@ -748,9 +760,9 @@ function planView() {
             : `<div class="empty"><b>No repeating items</b>Add rent, utilities and paychecks once, then log each with one tap every month.</div>`}
         </section>
         <section class="sect"><div class="sect-head"><h2>Backup</h2></div>
-          <p class="hint">Your budget is saved only on this phone. A backup file protects it if the phone is lost, and lets you move it to another phone.</p>
+          <p class="hint">Your budget is saved only on this phone. A backup file protects it if the phone is lost, and lets you move it to another phone. Use Add from file to bring in a backup or a statement import.</p>
           <p class="hint">Last backup: ${pref.get(KEY_BACKUP) ? esc(parseD(pref.get(KEY_BACKUP)).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })) : 'never'}</p>
-          <div class="filters"><button type="button" class="btn small" data-act="backup">Save backup</button><button type="button" class="btn small" data-act="restore">Restore from backup</button>
+          <div class="filters"><button type="button" class="btn small" data-act="backup">Save backup</button><button type="button" class="btn small" data-act="restore">Add from file</button>
           <input id="restore-file" type="file" accept=".json,application/json" hidden></div>
         </section>
       </div>
@@ -931,7 +943,9 @@ function renderBanner() {
   const parts = [];
   if (UI.restore) {
     const r = UI.restore;
-    parts.push(`<div class="banner"><span><b>Replace everything on this phone?</b> The backup holds ${r.tx.length} entries, ${r.debts.length} debts and ${r.bills.length} repeating items.</span><span class="acts"><button type="button" class="btn small danger" data-act="restore-yes">Replace</button><button type="button" class="btn small" data-act="restore-no">Cancel</button></span></div>`);
+    const what = r.isImport ? `This file holds ${r.tx.length.toLocaleString()} statement entries. Anything already on this phone stays, and duplicates are skipped.`
+      : `This backup holds ${r.tx.length.toLocaleString()} entries, ${r.debts.length} debts and ${r.bills.length} repeating items. Adding keeps what is on this phone. Replacing erases it first.`;
+    parts.push(`<div class="banner"><span><b>${r.isImport ? 'Add these entries?' : 'Add this backup?'}</b> ${what}</span><span class="acts"><button type="button" class="btn small primary" data-act="merge-yes">Add entries</button>${r.isImport ? '' : '<button type="button" class="btn small danger" data-act="restore-yes">Replace everything</button>'}<button type="button" class="btn small" data-act="restore-no">Cancel</button></span></div>`);
   }
   if (!isInstalled() && !pref.get(KEY_HIDE_INSTALL) && (installPrompt || IS_IOS || IS_ANDROID)) {
     const how = installPrompt ? 'Add it to your home screen so it opens like any other app.'
@@ -1004,18 +1018,19 @@ function openEntry(t = {}, preset = {}) {
   const seg = (k, l) => `<label><input type="radio" name="e-kind" id="e-kind-${k}" value="${k}" ${v.kind === k ? 'checked' : ''}><span>${l}</span></label>`;
   sheet.innerHTML = `<form class="sheetform" id="entry-form" novalidate>
     <h2>${prev ? 'Edit entry' : 'Add an entry'}</h2>
-    <div class="seg full" role="radiogroup" aria-label="Entry type">${seg('expense', 'Expense')}${seg('income', 'Money in')}${seg('debt', 'Debt payment')}</div>
+    <div class="seg full" role="radiogroup" aria-label="Entry type">${seg('expense', 'Expense')}${seg('income', 'Money in')}${seg('debt', 'Debt')}${seg('transfer', 'Transfer')}</div>
     <label class="field"><span>Amount</span><input id="e-amount" class="money bigmoney" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" value="${plain(v.amount)}"></label>
     <div class="err" id="e-err" hidden></div>
     <label class="field" id="e-cat-f"><span>Category</span><select id="e-cat">${catOptions(v.cat || lastCat)}</select></label>
-    <label class="field" id="e-debt-f"><span>Debt</span>${S.debts.length ? `<select id="e-debt">${S.debts.map(d => `<option value="${esc(d.id)}" ${v.debtId === d.id ? 'selected' : ''}>${esc(d.name)} (${money(d.balance)})</option>`).join('')}</select>` : `<span class="hint">Add a debt on the Debts tab first.</span>`}</label>
+    <label class="field" id="e-debt-f"><span>Debt</span>${S.debts.length || prev ? `<select id="e-debt">${prev ? '<option value="">Not linked to a debt on my list</option>' : ''}${S.debts.map(d => `<option value="${esc(d.id)}" ${v.debtId === d.id ? 'selected' : ''}>${esc(d.name)} (${money(d.balance)})</option>`).join('')}</select>` : `<span class="hint">Add a debt on the Debts tab first.</span>`}</label>
+    <label class="field" id="e-dir-f"><span>Direction</span><select id="e-dir"><option value="out" ${v.dir !== 'in' ? 'selected' : ''}>Out of this account</option><option value="in" ${v.dir === 'in' ? 'selected' : ''}>Into this account</option></select></label>
     <div class="two"><label class="field"><span>Date</span><input id="e-date" type="date" value="${esc(v.date)}"></label>
     <label class="field"><span>Note</span><input id="e-note" type="text" maxlength="120" value="${esc(v.note || '')}" placeholder="Optional"></label></div>
     <div class="sheetacts">${prev ? '<button type="button" class="btn danger del" id="e-del">Delete</button>' : ''}
       <button type="button" class="btn" data-act="close">Cancel</button><button type="submit" class="btn primary">Save</button></div></form>`;
   const sync = () => {
     const k = $('input[name=e-kind]:checked', sheet).value;
-    $('#e-cat-f').hidden = k !== 'expense'; $('#e-debt-f').hidden = k !== 'debt';
+    $('#e-cat-f').hidden = k !== 'expense'; $('#e-debt-f').hidden = k !== 'debt'; $('#e-dir-f').hidden = k !== 'transfer';
   };
   sheet.querySelectorAll('input[name=e-kind]').forEach(r => r.addEventListener('change', sync)); sync();
   $('#entry-form').addEventListener('submit', e => {
@@ -1024,11 +1039,14 @@ function openEntry(t = {}, preset = {}) {
     const fail = m => { err.textContent = m; err.hidden = false; };
     if (!amount) return fail('Enter an amount above zero, like 42.50.');
     if (!date) return fail('Pick a date.');
-    if (kind === 'debt' && !S.debts.length) return fail('Add a debt on the Debts tab before logging a payment.');
+    if (kind === 'debt' && !S.debts.length && !prev) return fail('Add a debt on the Debts tab before logging a payment.');
     const doc = { kind, amount, date, note: $('#e-note').value.trim() };
     if (kind === 'expense') { doc.cat = lastCat = $('#e-cat').value; }
-    if (kind === 'debt') doc.debtId = $('#e-debt').value;
+    if (kind === 'debt' && $('#e-debt') && $('#e-debt').value) doc.debtId = $('#e-debt').value;
+    if (kind === 'transfer') doc.dir = $('#e-dir').value;
+    if (kind === 'expense' && prev && prev.refund) doc.refund = true;
     if (prev && prev.billId) doc.billId = prev.billId;
+    if (prev && prev.src) doc.src = prev.src;
     saveTx(doc, prev); closeSheet();
     toast(prev ? 'Entry updated' : `Saved ${money(amount)}`);
   });
@@ -1111,7 +1129,7 @@ async function exportCsv() {
   };
   const rows = [['Date', 'Type', 'Category or debt', 'Note', 'Amount']];
   S.tx.slice().sort((a, b) => a.date.localeCompare(b.date)).forEach(t => {
-    rows.push([t.date, t.kind === 'income' ? 'Money in' : t.kind === 'debt' ? 'Debt payment' : 'Expense',
+    rows.push([t.date, t.kind === 'income' ? 'Money in' : t.kind === 'debt' ? 'Debt payment' : t.kind === 'transfer' ? (t.dir === 'in' ? 'Transfer in' : 'Transfer out') : t.refund ? 'Refund' : 'Expense',
       t.kind === 'debt' ? (debtById(t.debtId) || {}).name : t.kind === 'expense' ? catName(t.cat) : '', t.note, (t.amount / 100).toFixed(2)]);
   });
   try {
@@ -1178,6 +1196,7 @@ document.addEventListener('change', e => {
     savePlan({ extra: v }); render();
   }
   else if (t.name === 'strategy') { savePlan({ strategy: t.value }); refreshDebtResults(); }
+  else if (t.id === 'month-pick') { UI.month = t.value; render(); }
   else if (t.id === 'f-cat') { UI.cat = t.value; if (UI.cat && UI.kind !== 'expense') UI.kind = 'all'; render(); }
 });
 document.addEventListener('input', e => {
@@ -1235,12 +1254,16 @@ const hasId = x => x && typeof x === 'object' && typeof x.id === 'string' && x.i
 const text = v => (v == null ? undefined : String(v));
 function parseBackup(raw) {
   const b = JSON.parse(raw);
-  if (!b || b.app !== 'tallybook' || !Array.isArray(b.tx) || !Array.isArray(b.debts) || !Array.isArray(b.bills)) throw new Error('format');
+  if (!b || b.app !== 'tallybook' || !Array.isArray(b.tx)) throw new Error('format');
+  const isImport = b.kind === 'import';
+  if (!isImport && (!Array.isArray(b.debts) || !Array.isArray(b.bills))) throw new Error('format');
   const clean = o => JSON.parse(JSON.stringify(o));
   return {
-    tx: b.tx.filter(t => hasId(t) && /^\d{4}-\d{2}-\d{2}$/.test(t.date) && ['income', 'expense', 'debt'].includes(t.kind)).map(t => clean({ ...t, amount: cents(t.amount), applied: t.applied == null ? undefined : cents(t.applied), note: text(t.note), cat: text(t.cat), debtId: text(t.debtId), billId: text(t.billId) })),
-    debts: b.debts.filter(hasId).map(d => clean({ ...d, name: String(d.name || 'Debt'), balance: cents(d.balance), start: cents(d.start), min: cents(d.min), apr: Math.max(0, Number(d.apr) || 0), day: dayNum(d.day) })),
-    bills: b.bills.filter(hasId).map(x => clean({ ...x, name: String(x.name || 'Bill'), amount: cents(x.amount), day: dayNum(x.day), kind: x.kind === 'income' ? 'income' : 'bill', cat: text(x.cat) })),
+    tx: b.tx.filter(t => hasId(t) && /^\d{4}-\d{2}-\d{2}$/.test(t.date) && ['income', 'expense', 'debt', 'transfer'].includes(t.kind)).map(t => clean({ ...t, amount: cents(t.amount), applied: t.applied == null ? undefined : cents(t.applied), note: text(t.note), cat: text(t.cat), debtId: text(t.debtId), billId: text(t.billId), dir: t.kind === 'transfer' ? (t.dir === 'in' ? 'in' : 'out') : undefined, refund: t.refund ? true : undefined })),
+    isImport,
+    cats: (Array.isArray(b.cats) ? b.cats : []).filter(hasId).map(c => ({ id: c.id, name: String(c.name || 'Category'), budget: 0 })),
+    debts: (b.debts || []).filter(hasId).map(d => clean({ ...d, name: String(d.name || 'Debt'), balance: cents(d.balance), start: cents(d.start), min: cents(d.min), apr: Math.max(0, Number(d.apr) || 0), day: dayNum(d.day) })),
+    bills: (b.bills || []).filter(hasId).map(x => clean({ ...x, name: String(x.name || 'Bill'), amount: cents(x.amount), day: dayNum(x.day), kind: x.kind === 'income' ? 'income' : 'bill', cat: text(x.cat) })),
     plan: b.plan && Array.isArray(b.plan.cats) ? clean({ ...b.plan, income: cents(b.plan.income), extra: cents(b.plan.extra), strategy: b.plan.strategy === 'snowball' ? 'snowball' : 'avalanche', cats: b.plan.cats.filter(hasId).map(c => ({ ...c, name: String(c.name || 'Category'), budget: cents(c.budget) })) }) : defaultPlan(),
   };
 }
@@ -1249,6 +1272,31 @@ async function applyRestore(r) {
   await backend.replaceAll({ tx: byId(r.tx), debts: byId(r.debts), bills: byId(r.bills), plan: { main: r.plan } });
   UI.restore = null; UI.month = curMonth(); toast('Backup restored.'); go('month');
 }
+async function applyMerge(r) {
+  const byId = a => Object.fromEntries(a.map(({ id, ...rest }) => [id, rest]));
+  const have = new Set(S.tx.map(t => t.id));
+  // Entries typed by hand have no statement id, so match those on date, type and amount, one for one.
+  const typed = {};
+  const sig = t => [t.date, t.kind, t.amount].join('|');
+  for (const t of S.tx) if (t.src !== 'chase') typed[sig(t)] = (typed[sig(t)] || 0) + 1;
+  const fresh = [];
+  let skipped = 0;
+  for (const t of r.tx) {
+    if (have.has(t.id)) { skipped++; continue; }
+    if (typed[sig(t)] > 0) { typed[sig(t)]--; skipped++; continue; }
+    fresh.push(t);
+  }
+  const cats = S.plan.cats.map(c => ({ ...c }));
+  for (const c of [...(r.cats || []), ...(r.isImport ? [] : r.plan.cats || [])]) {
+    const old = cats.find(x => x.id === c.id);
+    if (!old) cats.push({ ...c, budget: 0 }); else if (old.archived) delete old.archived;
+  }
+  const missing = (mine, theirs) => mine.concat(theirs.filter(x => !mine.some(y => y.id === x.id)));
+  await backend.replaceAll({ tx: byId(S.tx.concat(fresh)), debts: byId(missing(S.debts, r.debts)), bills: byId(missing(S.bills, r.bills)), plan: { main: { ...S.plan, cats } } });
+  UI.restore = null;
+  toast(`Added ${fresh.length.toLocaleString()} entries${skipped ? `, skipped ${skipped.toLocaleString()} already here` : ''}.`);
+  go('month');
+}
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
@@ -1256,6 +1304,7 @@ document.addEventListener('click', e => {
   if (a === 'backup') saveBackup();
   else if (a === 'restore') $('#restore-file').click();
   else if (a === 'restore-yes') applyRestore(UI.restore);
+  else if (a === 'merge-yes') applyMerge(UI.restore);
   else if (a === 'restore-no') { UI.restore = null; renderBanner(); }
   else if (a === 'hide-install') { pref.set(KEY_HIDE_INSTALL, '1'); renderBanner(); }
   else if (a === 'install' && installPrompt) { installPrompt.prompt(); installPrompt.userChoice.finally(() => { installPrompt = null; renderBanner(); }); }
@@ -1263,7 +1312,7 @@ document.addEventListener('click', e => {
 document.addEventListener('change', async e => {
   if (e.target.id !== 'restore-file' || !e.target.files[0]) return;
   try { UI.restore = parseBackup(await e.target.files[0].text()); renderBanner(); window.scrollTo(0, 0); }
-  catch (err) { toast('That file isn\u2019t a Tallybook backup. Choose a file named tallybook-backup.'); }
+  catch (err) { toast('That file isn\u2019t a Tallybook file. Choose a backup or import file saved from Tallybook.'); }
 });
 let lastSeen = today();
 document.addEventListener('visibilitychange', () => {
@@ -1278,7 +1327,12 @@ function boot() {
   backend = localBackend();
   connect();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    const hadWorker = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadWorker && !reloaded && !UI.restore) { reloaded = true; location.reload(); } });
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
 }
 boot();
 </script>
